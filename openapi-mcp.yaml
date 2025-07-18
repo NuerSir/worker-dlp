@@ -1,0 +1,229 @@
+openapi: 3.0.0
+info:
+  title: yt-dlp Worker MCP Server API
+  description: A Model Context Protocol (MCP) server for yt-dlp functionality with additional REST API support
+  version: 1.0.0
+servers:
+  - url: https://<your-supabase-project-ref>.supabase.co/functions/v1
+    description: Supabase Edge Function endpoint
+
+paths:
+  /worker-dlp:
+    post:
+      summary: MCP JSON-RPC endpoint or REST API
+      description: >-
+        This endpoint serves dual purposes:
+        1. MCP JSON-RPC requests for MCP clients (Claude Desktop, Dify, etc.)
+        2. REST API for direct HTTP calls with legacy support
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/MCPRequest'
+                - $ref: '#/components/schemas/RESTRequest'
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/MCPResponse'
+                  - $ref: '#/components/schemas/RESTResponse'
+        '401':
+          description: Unauthorized - Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Enter your API key in the format: Bearer <YOUR_API_KEY>
+        
+  schemas:
+    MCPRequest:
+      type: object
+      required:
+        - jsonrpc
+        - method
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        method:
+          type: string
+          enum: 
+            - "initialize"
+            - "tools/list"
+            - "tools/call"
+        params:
+          type: object
+          description: Method-specific parameters
+        id:
+          oneOf:
+            - type: string
+            - type: number
+      x-42c-sample:
+        initialize:
+          jsonrpc: "2.0"
+          method: "initialize"
+          id: 1
+        tools_list:
+          jsonrpc: "2.0"
+          method: "tools/list"
+          id: 2
+        tools_call:
+          jsonrpc: "2.0"
+          method: "tools/call"
+          params:
+            name: "get_video_info"
+            arguments:
+              url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+          id: 3
+
+    MCPResponse:
+      type: object
+      required:
+        - jsonrpc
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          oneOf:
+            - type: string
+            - type: number
+        result:
+          type: object
+          description: Success result
+        error:
+          type: object
+          description: Error details
+
+    RESTRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          description: The URL of the video/audio to process
+          example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        action:
+          type: string
+          enum: ["info", "download", "audio", "formats", "playlist"]
+          description: Action to perform
+          default: "info"
+        format:
+          type: string
+          description: Format selector for downloads
+          example: "best"
+        quality:
+          type: string
+          description: Quality preference
+          example: "720p"
+        output_template:
+          type: string
+          description: Output filename template
+        max_downloads:
+          type: number
+          description: Max downloads for playlists
+        playlist_start:
+          type: number
+          description: Playlist start index
+        playlist_end:
+          type: number
+          description: Playlist end index
+      required:
+        - url
+
+    RESTResponse:
+      type: object
+      properties:
+        isError:
+          type: boolean
+        content:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: ["text"]
+              text:
+                type: string
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        code:
+          type: number
+          description: Error code for JSON-RPC errors
+
+# Available MCP Tools Documentation
+x-mcp-tools:
+  - name: get_video_info
+    description: Extract detailed information about a video/audio from URL without downloading
+    parameters:
+      url: Video/audio URL to analyze
+    example: |
+      {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "name": "get_video_info",
+          "arguments": {
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+          }
+        },
+        "id": 1
+      }
+      
+  - name: download_video
+    description: Download video with specified format and quality options
+    parameters:
+      url: Video URL to download
+      format: Format selector (optional)
+      quality: Quality preference (optional)
+      output_template: Filename template (optional)
+      
+  - name: download_audio
+    description: Extract and download audio from video URL
+    parameters:
+      url: Video URL to extract audio from
+      format: Audio format like mp3, aac, flac (optional)
+      quality: Audio quality (optional)
+      output_template: Filename template (optional)
+      
+  - name: get_formats
+    description: List all available formats for a video/audio URL
+    parameters:
+      url: Video URL to check formats for
+      
+  - name: download_playlist
+    description: Download entire playlist or channel
+    parameters:
+      url: Playlist or channel URL
+      format: Format for all videos (optional)
+      max_downloads: Maximum videos to download (optional)
+      playlist_start: Start index (optional)
+      playlist_end: End index (optional)
