@@ -13,7 +13,7 @@
     "supabase:logs": "supabase functions logs worker-dlp --follow",
     "supabase:secrets": "supabase secrets list",
     
-    "private:dev": "deno run --allow-all --watch index.ts",
+    "private:dev": "deno run --env-file=.env.local --allow-all --watch index.ts",
     "private:start": "deno run --allow-all index.ts",
     
     "check": "deno check index.ts",

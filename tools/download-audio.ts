@@ -1,6 +1,7 @@
 import type { MCPTool, MCPToolHandler, MCPToolResult } from "../types/mcp.ts";
 import type { YtDlpExecutor } from "../lib/executor.ts";
 import type { StorageManager } from "../lib/storage.ts";
+import { getBaseFileNameFromUrl, extractFilePathFromOutput, findFileInTempDir } from "../lib/utils.ts";
 
 /**
  * 创建音频下载工具的处理器
@@ -71,13 +72,53 @@ export function createDownloadAudioTool(
         }
 
         try {
-            // 生成临时文件名
-            const timestamp = new Date().getTime();
+            // 获取视频信息来生成一致的文件名
+            const baseFileName = await getBaseFileNameFromUrl(executor, url.trim(), "audio");
+
+            // 1. 首先检查 Supabase 服务器端是否已有该音频文件
+            console.log(`🔍 检查服务器端是否已有音频文件: ${baseFileName}`);
+            const existingUrl = await storage.checkFileExists(baseFileName);
+            
+            if (existingUrl) {
+                console.log(`✅ 发现服务器端已有音频文件，直接返回链接`);
+                return {
+                    content: [{
+                        type: "text",
+                        text: `✅ **音频已存在于服务器！**\n\n🔗 **下载链接**：${existingUrl}\n\n📁 **文件名**：${baseFileName}\n\n💡 **提示**：音频文件已存在，无需重新提取。链接有效期为 24 小时。`,
+                    }],
+                };
+            }
+
+            // 2. 检查本地临时目录是否已有该音频文件
+            console.log(`🔍 检查本地临时目录是否已有音频文件: ${baseFileName}`);
+            const localFilePath = await storage.checkLocalFileExists(baseFileName);
+            
+            if (localFilePath) {
+                console.log(`✅ 发现本地已有音频文件，直接上传: ${localFilePath}`);
+                
+                const uploadResult = await storage.uploadFile(localFilePath, baseFileName);
+                
+                if (uploadResult.success) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `✅ **音频上传成功！**\n\n🔗 **下载链接**：${uploadResult.url}\n\n📁 **文件名**：${baseFileName}\n\n💡 **提示**：使用本地缓存文件上传，节省提取时间。链接有效期为 24 小时。`,
+                        }],
+                    };
+                } else {
+                    console.warn(`本地音频文件上传失败: ${uploadResult.error}，继续提取...`);
+                }
+            }
+
+            // 3. 如果都没有，则进行音频提取
+            console.log(`🎵 开始提取新音频: ${url}`);
+            
+            // 使用基于内容的文件名而不是时间戳
             const tempFileName = output_template
                 ? (typeof output_template === "string"
                     ? output_template
-                    : `audio_${timestamp}.%(ext)s`)
-                : `audio_${timestamp}.%(ext)s`;
+                    : `${baseFileName}.%(ext)s`)
+                : `${baseFileName}.%(ext)s`;
 
             // 执行音频提取
             const extractResult = await executor.extractAudio(url.trim(), {
@@ -97,47 +138,12 @@ export function createDownloadAudioTool(
             }
 
             // 从输出中提取实际的文件路径
-            const outputLines = extractResult.output.split("\n");
-            let extractedFilePath = "";
-
-            // 查找输出文件路径
-            for (const line of outputLines) {
-                if (line.includes("Destination:")) {
-                    extractedFilePath = line.split("Destination:")[1].trim();
-                    break;
-                } else if (line.includes("[ExtractAudio]")) {
-                    // 查找 [ExtractAudio] 相关的输出
-                    const match = line.match(/Destination:\s*(.+)$/);
-                    if (match) {
-                        extractedFilePath = match[1].trim();
-                        break;
-                    }
-                }
-            }
+            let extractedFilePath = extractFilePathFromOutput(extractResult.output);
 
             // 如果没有找到具体路径，尝试查找音频文件
             if (!extractedFilePath) {
-                try {
-                    const baseFileName = tempFileName.replace(/\.\%\(ext\)s$/, "");
-                    const files = [];
-
-                    for await (const dirEntry of Deno.readDir(".")) {
-                        if (
-                            dirEntry.isFile &&
-                            (dirEntry.name.startsWith(baseFileName) ||
-                                dirEntry.name.endsWith(`.${audioFormat}`))
-                        ) {
-                            files.push(dirEntry.name);
-                        }
-                    }
-
-                    if (files.length > 0) {
-                        // 选择最新的文件
-                        extractedFilePath = files.sort().pop() || "";
-                    }
-                } catch (readDirError) {
-                    console.warn("无法读取目录:", readDirError);
-                }
+                const pattern = tempFileName.replace(/\.\%\(ext\)s$/, "");
+                extractedFilePath = await findFileInTempDir(pattern, `.${audioFormat}`) || "";
             }
 
             if (!extractedFilePath) {
@@ -161,10 +167,13 @@ export function createDownloadAudioTool(
                     return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
                 };
 
+                // 上传到 Supabase Storage，生成带扩展名的文件名
+                const actualFileName = extractedFilePath.split('/').pop() || 'audio';
+                const fileExtension = actualFileName.split('.').pop() || audioFormat;
+                const finalFileName = `${baseFileName}.${fileExtension}`;
+                
                 const fileSize = formatFileSize(fileInfo.size);
-
-                // 上传到 Supabase Storage
-                const uploadResult = await storage.uploadFile(extractedFilePath, extractedFilePath);
+                const uploadResult = await storage.uploadFile(extractedFilePath, finalFileName);
 
                 // 清理本地临时文件
                 await storage.cleanupLocalFile(extractedFilePath);
@@ -183,7 +192,7 @@ export function createDownloadAudioTool(
                     content: [{
                         type: "text",
                         text:
-                            `🎵 **音频提取成功！**\n\n🔗 **下载链接**：${uploadResult.url}\n\n📁 **文件信息**：\n- 文件名：${extractedFilePath}\n- 格式：${audioFormat.toUpperCase()}\n- 大小：${fileSize}\n- 质量：${quality}\n\n💡 **提示**：链接有效期为 24 小时，请及时保存到本地。`,
+                            `🎵 **音频提取成功！**\n\n🔗 **下载链接**：${uploadResult.url}\n\n📁 **文件信息**：\n- 文件名：${finalFileName}\n- 格式：${audioFormat.toUpperCase()}\n- 大小：${fileSize}\n- 质量：${quality}\n\n💡 **提示**：链接有效期为 24 小时，请及时保存到本地。`,
                     }],
                 };
             } catch {

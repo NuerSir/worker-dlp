@@ -4,6 +4,7 @@
  */
 
 import { createClient, type SupabaseClient } from "../deps.ts";
+import { sanitizeFileName, getTempDir, findFileInTempDir } from "./utils.ts";
 
 /**
  * 文件上传结果接口
@@ -37,8 +38,8 @@ export class StorageManager {
     /**
      * 初始化存储桶（如果不存在则创建）
      */
-    async initializeBucket(): Promise<void> {
-        //TODO: 暂时没必要;
+    initializeBucket(): void {
+        // TODO(@user): 暂时没必要创建存储桶，因为已经存在
         try {
             // const { data: buckets } = await this.supabase.storage.listBuckets();
             // const bucketExists = buckets?.some((bucket) => bucket.name === this.bucketName);
@@ -69,9 +70,9 @@ export class StorageManager {
             // 读取本地文件
             const fileData = await Deno.readFile(localPath);
 
-            // 生成唯一的文件名（添加时间戳）
-            const timestamp = Date.now();
-            const uniqueFileName = `${timestamp}_${fileName}`;
+            const cleanFileName = sanitizeFileName(fileName);
+            const uniqueFileName = cleanFileName;
+            const contentType = getMimeType(fileName);
 
             // 上传到 Supabase Storage
             const { error: uploadError } = await this.supabase.storage
@@ -79,6 +80,7 @@ export class StorageManager {
                 .upload(uniqueFileName, fileData, {
                     cacheControl: "3600",
                     upsert: false,
+                    contentType: contentType,
                 });
 
             if (uploadError) {
@@ -137,14 +139,14 @@ export class StorageManager {
             const cutoffTime = new Date();
             cutoffTime.setHours(cutoffTime.getHours() - maxAgeHours);
 
-            const expiredFiles = files.filter((file) => {
+            const expiredFiles = files.filter((file: { created_at: string | number | Date; }) => {
                 const fileTime = new Date(file.created_at);
                 return fileTime < cutoffTime;
             });
 
             // 批量删除过期文件
             if (expiredFiles.length > 0) {
-                const filesToDelete = expiredFiles.map((file) => file.name);
+                const filesToDelete = expiredFiles.map((file: { name: string; }) => file.name);
                 await this.supabase.storage
                     .from(this.bucketName)
                     .remove(filesToDelete);
@@ -176,7 +178,7 @@ export class StorageManager {
             }
 
             const totalFiles = files.length;
-            const totalSize = files.reduce((sum, file) => sum + (file.metadata?.size || 0), 0);
+            const totalSize = files.reduce((sum: number, file: { metadata: { size: number; }; }) => sum + (file.metadata?.size || 0), 0);
 
             return { totalFiles, totalSize };
         } catch (error) {
@@ -184,4 +186,138 @@ export class StorageManager {
             return { totalFiles: 0, totalSize: 0 };
         }
     }
+
+    /**
+     * 检查文件是否已存在于存储桶中
+     * @param fileName 要检查的文件名
+     * @returns 如果文件存在返回公共URL，否则返回null
+     */
+    async checkFileExists(fileName: string): Promise<string | null> {
+        try {
+            const cleanFileName = sanitizeFileName(fileName);
+
+            // 列出存储桶中的文件，查找匹配的文件名
+            const { data: files } = await this.supabase.storage
+                .from(this.bucketName)
+                .list();
+
+            if (!files) return null;
+
+            // 查找文件名包含清理后文件名的文件（考虑到时间戳前缀）
+            const existingFile = files.find((file: { name: string }) =>
+                file.name.includes(cleanFileName) ||
+                file.name.endsWith(cleanFileName)
+            );
+
+            if (existingFile) {
+                // 返回现有文件的公共URL
+                const { data: urlData } = this.supabase.storage
+                    .from(this.bucketName)
+                    .getPublicUrl(existingFile.name);
+
+                return urlData.publicUrl;
+            }
+
+            return null;
+        } catch (error) {
+            console.error("检查文件是否存在失败:", error);
+            return null;
+        }
+    }
+
+    /**
+     * 检查本地临时目录中是否存在文件
+     * @param fileName 要检查的文件名
+     * @returns 如果文件存在返回完整路径，否则返回null
+     */
+    async checkLocalFileExists(fileName: string): Promise<string | null> {
+        const cleanFileName = sanitizeFileName(fileName);
+        return await findFileInTempDir(cleanFileName);
+    }
+
+    /**
+     * 检查基础文件名是否已存在于存储桶中（忽略扩展名）
+     * @param baseFileName 基础文件名（不包含扩展名）
+     * @returns 如果找到匹配文件返回 {url: string, fileName: string}，否则返回null
+     */
+    async checkBaseFileNameExists(baseFileName: string): Promise<{ url: string, fileName: string } | null> {
+        try {
+            const cleanBaseFileName = sanitizeFileName(baseFileName);
+
+            // 列出存储桶中的文件
+            const { data: files } = await this.supabase.storage
+                .from(this.bucketName)
+                .list();
+
+            if (!files) return null;
+
+            // 查找匹配基础文件名的文件（可能有不同扩展名）
+            const existingFile = files.find((file: { name: string }) => {
+                // 移除时间戳前缀（如果有）
+                const fileNameWithoutPrefix = file.name.replace(/^\d+_/, '');
+                // 移除扩展名
+                const fileBaseName = fileNameWithoutPrefix.replace(/\.[^.]*$/, '');
+
+                return fileBaseName === cleanBaseFileName ||
+                    file.name.includes(cleanBaseFileName);
+            });
+
+            if (existingFile) {
+                // 返回现有文件的公共URL和文件名
+                const { data: urlData } = this.supabase.storage
+                    .from(this.bucketName)
+                    .getPublicUrl(existingFile.name);
+
+                return {
+                    url: urlData.publicUrl,
+                    fileName: existingFile.name
+                };
+            }
+
+            return null;
+        } catch (error) {
+            console.error("检查基础文件名是否存在失败:", error);
+            return null;
+        }
+    }
+}
+
+/**
+ * 根据文件扩展名获取 MIME 类型
+ * @param fileName 文件名
+ * @returns MIME 类型字符串
+ */
+function getMimeType(fileName: string): string {
+    const extension = fileName.split('.').pop()?.toLowerCase() || '';
+    
+    const mimeTypes: Record<string, string> = {
+        // 视频格式
+        'mp4': 'video/mp4',
+        'webm': 'video/webm',
+        'avi': 'video/x-msvideo',
+        'mov': 'video/quicktime',
+        'mkv': 'video/x-matroska',
+        'flv': 'video/x-flv',
+        '3gp': 'video/3gpp',
+        'm4v': 'video/x-m4v',
+        
+        // 音频格式
+        'mp3': 'audio/mpeg',
+        'aac': 'audio/aac',
+        'flac': 'audio/flac',
+        'm4a': 'audio/mp4',
+        'opus': 'audio/opus',
+        'ogg': 'audio/ogg',
+        'vorbis': 'audio/vorbis',
+        'wav': 'audio/wav',
+        'wma': 'audio/x-ms-wma',
+        
+        // 其他常见格式
+        'txt': 'text/plain',
+        'json': 'application/json',
+        'pdf': 'application/pdf',
+        'zip': 'application/zip',
+    };
+    
+    return mimeTypes[extension] || 'application/octet-stream';
 }

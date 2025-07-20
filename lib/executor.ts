@@ -1,4 +1,5 @@
 import type { ExecutorResult } from "../types/mcp.ts";
+import { getTempDir } from "./utils.ts";
 
 /**
  * yt-dlp 命令执行器
@@ -131,7 +132,10 @@ export class YtDlpExecutor {
         }
 
         if (options.outputTemplate) {
-            args.push("-o", options.outputTemplate);
+            // 将输出路径设置到临时目录
+            const tempDir = getTempDir();
+            const outputPath = `${tempDir}/${options.outputTemplate}`;
+            args.push("-o", outputPath);
         }
 
         args.push(url);
@@ -167,7 +171,10 @@ export class YtDlpExecutor {
         }
 
         if (options.outputTemplate) {
-            args.push("-o", options.outputTemplate);
+            // 将输出路径设置到临时目录
+            const tempDir = getTempDir();
+            const outputPath = `${tempDir}/${options.outputTemplate}`;
+            args.push("-o", outputPath);
         }
 
         args.push(url);
