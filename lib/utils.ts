@@ -2,13 +2,15 @@
  * 通用工具函数
  * 提供项目中各处需要的公共功能
  */
+import { path } from "../deps.ts";
+
 
 /**
  * 获取系统临时目录
  */
 export function getTempDir(): string {
     const os = Deno.build.os;
-    
+
     if (os === "windows") {
         return Deno.env.get("TEMP") || Deno.env.get("TMP") || "C:\\temp";
     } else {
@@ -17,65 +19,41 @@ export function getTempDir(): string {
 }
 
 /**
- * 清理文件名中的特殊字符
- * 使用字符映射而不是简单删除，保持文件名的可读性
+ * 云存储安全的文件名清理
+ * 遵循 AWS S3、Azure Blob Storage 等云存储的命名规范
  */
 export function sanitizeFileName(fileName: string): string {
-    // 字符映射表
-    const charMap: Record<string, string> = {
-        // Emoji 映射
-        '🤯': '[mind-blown]',
-        '🧂': '[salt]',
-        '❤️': '[heart]',
-        '😎': '[cool]',
-        '🔥': '[fire]',
-        '💯': '[hundred]',
-        '🚀': '[rocket]',
-        '⭐': '[star]',
-        '🎵': '[music]',
-        '🎶': '[notes]',
-        
-        // 特殊字符映射
-        ':': '_colon_',
-        '?': '_question_',
-        '<': '_lt_',
-        '>': '_gt_',
-        '"': '_quote_',
-        '|': '_pipe_',
-        '*': '_star_',
-        '/': '_slash_',
-        '\\': '_backslash_',
-        
-        // 其他常见特殊字符
-        '&': '_and_',
-        '@': '_at_',
-        '#': '_hash_',
-        '%': '_percent_',
-        '+': '_plus_',
-        '=': '_equals_',
-        '[': '_bracket_',
-        ']': '_bracket_',
-        '{': '_brace_',
-        '}': '_brace_',
-        '^': '_caret_',
-        '~': '_tilde_',
-        '`': '_grave_',
-    };
-
-    let cleaned = fileName;
-    
-    // 应用字符映射
-    for (const [char, replacement] of Object.entries(charMap)) {
-        cleaned = cleaned.replaceAll(char, replacement);
+    if (!fileName || fileName.trim().length === 0) {
+        return "unnamed";
     }
-    
-    // 清理连续的空格和特殊字符
+
+    let cleaned = fileName.trim();
+
+    // 1. 移除或替换不安全的字符，只保留安全字符
+    // 安全字符：字母、数字、连字符、下划线、点号
     cleaned = cleaned
-        .replace(/\s+/g, '_')              // 多个空格替换为单个下划线
-        .replace(/_{2,}/g, '_')            // 多个连续下划线替换为单个
-        .replace(/^_+|_+$/g, '')           // 移除开头和结尾的下划线
-        .replace(/[^a-zA-Z0-9._-]/g, '');  // 移除其他特殊字符
-    
+        .normalize('NFD') // 规范化 Unicode
+        .replace(/[\u0300-\u036f]/g, '') // 移除重音符号
+        .replace(/[^\w\s.-]/g, '') // 只保留字母、数字、空格、点、连字符
+        .replace(/\s+/g, '-') // 空格替换为连字符
+        .replace(/\.{2,}/g, '.') // 多个点替换为单个点
+        .replace(/-{2,}/g, '-') // 多个连字符替换为单个
+        .replace(/^[-._]+|[-._]+$/g, '') // 移除开头和结尾的特殊字符
+        .toLowerCase(); // 转为小写（云存储推荐）
+
+    // 2. 限制长度（大多数云存储建议文件名不超过 255 字符，但实际应该更短）
+    const maxLength = 100; // 保守的长度限制
+    if (cleaned.length > maxLength) {
+        cleaned = cleaned.substring(0, maxLength);
+        // 确保不以特殊字符结尾
+        cleaned = cleaned.replace(/[-._]+$/, '');
+    }
+
+    // 3. 避免空文件名或只有扩展名的情况
+    if (cleaned.length === 0 || cleaned === '.') {
+        cleaned = 'unnamed';
+    }
+
     return cleaned;
 }
 
@@ -85,7 +63,7 @@ export function sanitizeFileName(fileName: string): string {
 export async function getBaseFileNameFromUrl(executor: { getVideoInfo: (url: string) => Promise<{ success: boolean; output: string }> }, url: string, defaultName: string = "video"): Promise<string> {
     try {
         const videoInfoResult = await executor.getVideoInfo(url.trim());
-        
+
         if (videoInfoResult.success) {
             try {
                 const videoInfo = JSON.parse(videoInfoResult.output);
@@ -99,7 +77,7 @@ export async function getBaseFileNameFromUrl(executor: { getVideoInfo: (url: str
     } catch (error) {
         console.warn(`获取视频信息失败: ${error}`);
     }
-    
+
     return sanitizeFileName(defaultName);
 }
 
@@ -108,27 +86,34 @@ export async function getBaseFileNameFromUrl(executor: { getVideoInfo: (url: str
  */
 export async function findFileInTempDir(pattern: string, extension: string = ""): Promise<string | null> {
     const tempDir = getTempDir();
-    
+
     try {
+        // 首先检查目录是否存在
+        const dirInfo = await Deno.stat(tempDir).catch(() => null);
+        if (!dirInfo || !dirInfo.isDirectory) {
+            console.warn(`临时目录不存在或不是目录: ${tempDir}`);
+            return null;
+        }
+
         for await (const entry of Deno.readDir(tempDir)) {
             if (entry.isFile) {
                 const fileName = entry.name;
-                
+
                 // 检查文件名是否包含模式
                 if (fileName.includes(pattern)) {
                     // 如果指定了扩展名，检查扩展名是否匹配
                     if (extension && !fileName.endsWith(extension)) {
                         continue;
                     }
-                    
-                    return `${tempDir}/${fileName}`;
+
+                    return path.join(tempDir, fileName);
                 }
             }
         }
     } catch (error) {
         console.warn(`读取临时目录失败: ${error}`);
     }
-    
+
     return null;
 }
 
@@ -138,25 +123,32 @@ export async function findFileInTempDir(pattern: string, extension: string = "")
 export function extractFilePathFromOutput(output: string): string {
     const outputLines = output.split('\n');
     const actualTempDir = getTempDir();
-    
-    // 优先查找 "[ExtractAudio] Destination:" 行（音频转换后的最终文件）
+
+    // 优先查找 "[ExtractAudio] Destination:" 行
     for (const line of outputLines) {
         if (line.includes("[ExtractAudio] Destination:")) {
             const extractedPath = line.split("[ExtractAudio] Destination:")[1].trim();
-            // 如果路径不是绝对路径，添加临时目录前缀
-            return extractedPath.startsWith('/') ? extractedPath : `${actualTempDir}/${extractedPath}`;
+            // 修复：使用 path.isAbsolute 而不是简单检查 '/'
+            if (path.isAbsolute(extractedPath)) {
+                return extractedPath;
+            } else {
+                return path.join(actualTempDir, extractedPath);
+            }
         }
     }
-    
+
     // 如果没有找到音频转换行，查找普通的 "Destination:" 行
     for (const line of outputLines) {
         if (line.includes("Destination:") && !line.includes("[ExtractAudio]")) {
             const extractedPath = line.split("Destination:")[1].trim();
-            // 如果路径不是绝对路径，添加临时目录前缀
-            return extractedPath.startsWith('/') ? extractedPath : `${actualTempDir}/${extractedPath}`;
+            if (path.isAbsolute(extractedPath)) {
+                return extractedPath;
+            } else {
+                return path.join(actualTempDir, extractedPath);
+            }
         }
     }
-    
+
     return "";
 }
 

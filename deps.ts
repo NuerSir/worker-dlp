@@ -2,6 +2,7 @@
  * 统一依赖管理 - Supabase Edge Functions 专用
  * 集中管理所有外部依赖，避免版本冲突
  */
+export * as path from "https://deno.land/std@0.200.0/path/mod.ts";
 
 // Supabase 客户端
 export { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.7";
