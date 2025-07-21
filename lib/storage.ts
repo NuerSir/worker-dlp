@@ -178,7 +178,8 @@ export class StorageManager {
             }
 
             const totalFiles = files.length;
-            const totalSize = files.reduce((sum: number, file: { metadata: { size: number; }; }) => sum + (file.metadata?.size || 0), 0);
+            //@ts-ignore TODO(@nuer): 这不是个错误, file类型存在, supabase升级后FileObject暂时未找到导出地址;
+            const totalSize: number = files.reduce((sum: number, file: { metadata: { size: number; }; }) => sum + (file.metadata?.size || 0), 0);
 
             return { totalFiles, totalSize };
         } catch (error) {
