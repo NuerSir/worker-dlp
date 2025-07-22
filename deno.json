@@ -8,13 +8,13 @@
     "@supabase/supabase-js": "jsr:@supabase/supabase-js@2"
   },
   "tasks": {
+    "dev": "deno run --env-file=.env.local --allow-all --watch index.ts",
+    "start": "deno run --allow-all index.ts",
+
     "supabase:dev": "supabase functions serve --env-file .env.local",
     "supabase:deploy": "supabase functions deploy worker-dlp",
     "supabase:logs": "supabase functions logs worker-dlp --follow",
     "supabase:secrets": "supabase secrets list",
-    
-    "private:dev": "deno run --env-file=.env.local --allow-all --watch index.ts",
-    "private:start": "deno run --allow-all index.ts",
     
     "check": "deno check index.ts",
     "check:all": "deno check **/*.ts",
@@ -25,7 +25,15 @@
     "cache": "deno cache --reload deps.ts",
     
     "deploy:check": "sh ./deploy-simple.sh",
-    "test:config": "deno run --allow-env config.ts"
+    "test:config": "deno run --allow-env config.ts",
+    
+    "build:linux": "deno compile --allow-all --target x86_64-unknown-linux-gnu --output ./dist/worker-dlp-linux index.ts",
+    "build:linux-arm": "deno compile --allow-all --target aarch64-unknown-linux-gnu --output ./dist/worker-dlp-linux-arm index.ts",
+    "build:windows": "deno compile --allow-all --target x86_64-pc-windows-msvc --output ./dist/worker-dlp-windows.exe index.ts",
+    "build:macos": "deno compile --allow-all --target x86_64-apple-darwin --output ./dist/worker-dlp-macos index.ts",
+    "build:all": "deno task build:linux && deno task build:linux-arm && deno task build:windows && deno task build:macos",
+    
+    "build:local": "deno compile --allow-all --output ./dist/worker-dlp index.ts"
   },
   "fmt": {
     "useTabs": false,

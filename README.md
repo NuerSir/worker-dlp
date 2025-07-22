@@ -7,7 +7,7 @@
 ### 本地开发
 ```bash
 # 启动服务器
-deno task private:dev
+deno task dev
 
 # 服务器会在 http://localhost:8000 启动
 ```
@@ -108,8 +108,8 @@ worker-dlp/
 
 ```bash
 # 开发
-deno task private:dev        # 本地开发
-deno task private:start      # 本地启动
+deno task dev        # 本地开发
+deno task start      # 本地启动
 
 # Supabase
 deno task supabase:dev       # Supabase 本地开发
