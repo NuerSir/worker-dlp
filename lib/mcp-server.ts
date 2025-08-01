@@ -7,8 +7,10 @@ import type {
     MCPServerInfo,
     MCPToolCallParams,
     MCPToolListResult,
+    TaskBase,
 } from "../types/mcp.ts";
-import { ToolRegistry } from "../tools/registry.ts";
+import { getTask } from "./storage.ts";
+import { ToolRegistry } from "./tool-registry.ts";
 
 /**
  * MCP 服务器核心
@@ -50,6 +52,9 @@ export class MCPServer {
 
                 case "tools/call":
                     return await this.handleToolsCall(params as MCPToolCallParams, id);
+
+                case "tasks/get":
+                    return this.handleTaskGet(params as { id?: string }, id);
 
                 default:
                     return {
@@ -137,6 +142,39 @@ export class MCPServer {
             jsonrpc: "2.0",
             id,
             result: toolResult,
+        };
+    }
+
+    /**
+     * 处理任务状态查询请求
+     */
+    private handleTaskGet(params: { id?: string }, id?: string | number | null): JSONRPCResponse {
+        if (!params?.id || typeof params.id !== "string") {
+            return {
+                jsonrpc: "2.0",
+                id,
+                error: {
+                    code: -32602,
+                    message: "无效参数：缺少任务ID (id)",
+                },
+            };
+        }
+        const task = getTask(params.id);
+        if (!task) {
+            return {
+                jsonrpc: "2.0",
+                id,
+                error: {
+                    code: -32004,
+                    message: `未找到任务：${params.id}`,
+                },
+            };
+        }
+        // 直接返回任务详情
+        return {
+            jsonrpc: "2.0",
+            id,
+            result: task,
         };
     }
 

@@ -1,11 +1,7 @@
 import type { MCPToolHandler } from "../types/mcp.ts";
-import { createVideoInfoTool } from "./video-info.ts";
-import { createDownloadVideoTool } from "./download-video.ts";
-import { createDownloadAudioTool } from "./download-audio.ts";
-import { createGetFormatsTool } from "./get-formats.ts";
-import { createDownloadPlaylistTool } from "./download-playlist.ts";
-import type { YtDlpExecutor } from "../lib/executor.ts";
-import type { StorageManager } from "../lib/storage.ts";
+
+
+
 
 /**
  * 工具注册表
@@ -14,33 +10,35 @@ import type { StorageManager } from "../lib/storage.ts";
 export class ToolRegistry {
     private tools: Map<string, MCPToolHandler> = new Map();
 
-    constructor(executor: YtDlpExecutor, storage: StorageManager) {
-        this.registerTools(executor, storage);
+    constructor() {
+        this.registerTools();
     }
 
     /**
      * 注册所有工具
      */
-    private registerTools(executor: YtDlpExecutor, storage: StorageManager): void {
-        // 注册视频信息工具
-        const videoInfoTool = createVideoInfoTool(executor);
-        this.tools.set(videoInfoTool.tool.name, videoInfoTool);
-
-        // 注册视频下载工具
-        const downloadVideoTool = createDownloadVideoTool(executor, storage);
-        this.tools.set(downloadVideoTool.tool.name, downloadVideoTool);
-
-        // 注册音频下载工具
-        const downloadAudioTool = createDownloadAudioTool(executor, storage);
-        this.tools.set(downloadAudioTool.tool.name, downloadAudioTool);
-
-        // 注册格式查询工具
-        const getFormatsTool = createGetFormatsTool(executor);
-        this.tools.set(getFormatsTool.tool.name, getFormatsTool);
-
-        // 注册播放列表下载工具
-        const downloadPlaylistTool = createDownloadPlaylistTool(executor, storage);
-        this.tools.set(downloadPlaylistTool.tool.name, downloadPlaylistTool);
+    /**
+     * 自动扫描 tools 目录并注册所有工具
+     * 工具需导出默认对象 { name, tool, handler }
+     */
+    private async registerTools() {
+        const toolsDir = new URL("../tools/", import.meta.url);
+        for await (const entry of Deno.readDir(toolsDir)) {
+            if (entry.isFile && entry.name.endsWith(".ts")) {
+                try {
+                    // 动态 import 工具模块
+                    const mod = await import(`${toolsDir}${entry.name}`);
+                    const toolMod = mod.default;
+                    if (toolMod && toolMod.name && toolMod.tool && toolMod.handler) {
+                        this.tools.set(toolMod.name, toolMod);
+                    } else {
+                        console.warn(`工具 ${entry.name} 缺少必要导出，已跳过。`);
+                    }
+                } catch (err) {
+                    console.error(`加载工具 ${entry.name} 失败:`, err);
+                }
+            }
+        }
     }
 
     /**

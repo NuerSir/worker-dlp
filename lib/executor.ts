@@ -1,5 +1,16 @@
 import type { ExecutorResult } from "../types/mcp.ts";
-import { getTempDir } from "./utils.ts";
+import { getFilesDir } from "./storage.ts";
+import type { ApiResponse } from "../types/api.ts";
+import { ApiErrorCode } from "../types/api.ts";
+import { config } from "../config.ts";
+// yt-dlp 元信息类型
+export interface YtDlpMeta {
+    id: string;
+    title: string;
+    duration?: number;
+    uploader?: string;
+    [key: string]: unknown;
+}
 
 /**
  * yt-dlp 命令执行器
@@ -24,10 +35,10 @@ export class YtDlpExecutor {
      * @param proxyUrl 可选的代理服务器 URL
      */
     constructor(proxyUrl?: string) {
-        this.proxyUrl = proxyUrl;
-        if (proxyUrl) {
-            console.log(`🌐 YtDlpExecutor 已配置代理: ${proxyUrl}`);
-        }
+        this.proxyUrl = proxyUrl || config.network.proxyUrl;
+        // if (this.proxyUrl) {
+        //     console.log(`🌐 YtDlpExecutor 已配置代理: ${this.proxyUrl}`);
+        // }
     }
 
     /**
@@ -35,9 +46,10 @@ export class YtDlpExecutor {
      * 自动添加代理配置，处理输出和错误
      *
      * @param args yt-dlp 命令参数数组
+     * @param taskId 可选的任务ID，用于进程管理
      * @returns 执行结果，包含成功状态、输出和错误信息
      */
-    async execute(args: string[]): Promise<ExecutorResult> {
+    async execute(args: string[], taskId?: string): Promise<ExecutorResult> {
         try {
             // 如果配置了代理，则添加代理参数
             const finalArgs = this.proxyUrl ? ["--proxy", this.proxyUrl, ...args] : args;
@@ -53,11 +65,26 @@ export class YtDlpExecutor {
                 stderr: "piped",
             });
 
-            const { code, stdout, stderr } = await command.output();
+            const child = command.spawn();
+
+            // 如果提供了 taskId，记录进程 PID 用于后续管理
+            if (taskId && child.pid) {
+                const { updateTaskProcessId } = await import("./storage.ts");
+                await updateTaskProcessId(taskId, child.pid);
+            }
+
+            const { code, stdout, stderr } = await child.output();
+
+            // 执行完成后清除进程 PID
+            if (taskId) {
+                const { updateTaskProcessId } = await import("./storage.ts");
+                await updateTaskProcessId(taskId, undefined);
+            }
+
             const output = new TextDecoder().decode(stdout);
             const error = new TextDecoder().decode(stderr);
 
-            const success = code === 0;
+            const success = code === ApiErrorCode.OK;
             console.log(
                 `${success ? "✅" : "❌"} yt-dlp 命令执行${
                     success ? "成功" : "失败"
@@ -70,6 +97,16 @@ export class YtDlpExecutor {
                 error: code !== 0 ? error : undefined,
             };
         } catch (err) {
+            // 执行异常时也要清除进程 PID
+            if (taskId) {
+                try {
+                    const { updateTaskProcessId } = await import("./storage.ts");
+                    await updateTaskProcessId(taskId, undefined);
+                } catch {
+                    // 忽略清理错误
+                }
+            }
+
             const errorMessage = err instanceof Error ? err.message : "未知错误";
             console.error("❌ yt-dlp 命令执行异常:", errorMessage);
 
@@ -82,11 +119,32 @@ export class YtDlpExecutor {
     }
 
     /**
-     * 获取视频信息（JSON 格式）
-     * 不下载文件，仅获取元数据信息
-     *
-     * @param url 视频 URL
-     * @returns 包含 JSON 格式视频信息的执行结果
+     * 获取视频/音频元信息（JSON 格式）
+     * @param url 视频/音频 URL
+     * @param extraArgs 额外 yt-dlp 参数
+     * @returns ApiResponse<YtDlpMeta>
+     */
+    async getMeta(url: string, extraArgs: string[] = []): Promise<ApiResponse<YtDlpMeta>> {
+        if (!url || typeof url !== "string") {
+            return { code: ApiErrorCode.INVALID_PARAM, msg: "无效的URL参数" };
+        }
+        const args = ["--dump-json", "--no-download", ...extraArgs, url];
+        const result = await this.execute(args);
+        if (!result.success || !result.output) {
+            return { code: ApiErrorCode.META_FETCH_FAILED, msg: result.error || "获取元信息失败" };
+        }
+        let meta: YtDlpMeta;
+        try {
+            meta = JSON.parse(result.output);
+        } catch (e) {
+            return { code: ApiErrorCode.META_FETCH_FAILED, msg: "元信息解析失败" };
+        }
+        return { code: ApiErrorCode.OK, msg: "ok", data: meta };
+    }
+
+    /**
+     * 兼容旧接口，获取视频信息（JSON 格式）
+     * @deprecated 请使用 getMeta
      */
     getVideoInfo(url: string): Promise<ExecutorResult> {
         console.log(`📊 获取视频信息: ${url}`);
@@ -132,9 +190,12 @@ export class YtDlpExecutor {
         }
 
         if (options.outputTemplate) {
-            // 将输出路径设置到临时目录
-            const tempDir = getTempDir();
-            const outputPath = `${tempDir}/${options.outputTemplate}`;
+            // 统一输出到 files 目录
+            const outputPath = `${getFilesDir()}/${options.outputTemplate}`;
+            args.push("-o", outputPath);
+        } else {
+            // 默认输出到 storage/files
+            const outputPath = `${getFilesDir()}/%(title)s.%(ext)s`;
             args.push("-o", outputPath);
         }
 
@@ -171,9 +232,12 @@ export class YtDlpExecutor {
         }
 
         if (options.outputTemplate) {
-            // 将输出路径设置到临时目录
-            const tempDir = getTempDir();
-            const outputPath = `${tempDir}/${options.outputTemplate}`;
+            // 统一输出到 files 目录
+            const outputPath = `${getFilesDir()}/${options.outputTemplate}`;
+            args.push("-o", outputPath);
+        } else {
+            // 默认输出到 storage/files
+            const outputPath = `${getFilesDir()}/%(title)s.%(ext)s`;
             args.push("-o", outputPath);
         }
 

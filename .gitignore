@@ -8,6 +8,7 @@
 deno.lock
 
 # 临时文件和下载目录
+/tmp/
 *.tmp
 *.temp
 downloads/

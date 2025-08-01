@@ -2,14 +2,11 @@
  * 统一依赖管理 - Supabase Edge Functions 专用
  * 集中管理所有外部依赖，避免版本冲突
  */
-export * as path from "https://deno.land/std@0.200.0/path/mod.ts";
 
-// Supabase 客户端
-export { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.7";
-export type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.39.7";
-
+export * as path from "https://deno.land/std@0.224.0/path/mod.ts";
 // Deno 标准库
 export { serve } from "https://deno.land/std@0.208.0/http/server.ts";
+export { default as LRU } from "https://deno.land/x/lru@1.0.2/mod.ts";
 
 // 类型定义
 export type {

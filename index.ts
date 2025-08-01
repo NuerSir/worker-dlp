@@ -4,7 +4,7 @@
  *
  * 架构说明：
  * - lib/executor.ts: yt-dlp 命令执行引擎
- * - lib/storage.ts: Supabase Storage 文件管理
+ * - lib/storage.ts: 文件管理
  * - lib/mcp-server.ts: MCP 协议处理核心
  * - tools/: 独立的工具实现 (video-info, download-video, download-audio, get-formats, download-playlist)
  * - types/mcp.    if (config.security.apiKey) {
@@ -23,11 +23,15 @@
 
 import { serve } from "./deps.ts";
 import { config } from "./config.ts";
-import { YtDlpExecutor } from "./lib/executor.ts";
-import { StorageManager } from "./lib/storage.ts";
-import { ToolRegistry } from "./tools/registry.ts";
+import { ToolRegistry } from "./lib/tool-registry.ts";
 import { MCPServer } from "./lib/mcp-server.ts";
+import { getDomain, getDownloadUrl } from "./config.ts";
 import type { JSONRPCRequest } from "./types/mcp.ts";
+
+// 启动时自动检测并输出未完成任务（断点续传/恢复基础能力）
+import { recoverUnfinishedTasks } from "./lib/download-task.ts";
+import { fixOrphanedTasks, cleanupAllRunningProcesses } from "./lib/process-manager.ts";
+
 
 // ==================== 环境配置 ====================
 
@@ -51,14 +55,8 @@ const SERVER_INFO = {
 
 // ==================== 初始化组件 ====================
 
-// 初始化 yt-dlp 执行器
-const executor = new YtDlpExecutor(config.network.proxyUrl);
-
-// 初始化存储管理器
-const storage = new StorageManager(config.supabase.url, config.supabase.anonKey);
-
 // 初始化工具注册表
-const toolRegistry = new ToolRegistry(executor, storage);
+const toolRegistry = new ToolRegistry();
 
 // 初始化 MCP 服务器
 const mcpServer = new MCPServer(toolRegistry, config.server);
@@ -69,11 +67,8 @@ const mcpServer = new MCPServer(toolRegistry, config.server);
  * 初始化服务器组件和存储桶
  * 确保所有必要的资源在服务器启动前准备就绪
  */
-async function initializeServer(): Promise<void> {
+function initializeServer(): void {
     try {
-        console.log("🔧 正在初始化 Supabase Storage...");
-        await storage.initializeBucket();
-
         console.log("✅ 服务器初始化完成");
         console.log(`📊 已注册 ${toolRegistry.getToolCount()} 个工具`);
         console.log(`🔧 可用工具: ${toolRegistry.getToolNames().join(", ")}`);
@@ -253,24 +248,23 @@ function generateHomePage(): string {
         <div class="endpoints">
             <div class="endpoint-title">🔗 服务端点</div>
             <div class="endpoint-item">
-                <strong>MCP JSON-RPC:</strong> POST ${config.supabase.url}/functions/v1/worker-dlp
+                <strong>MCP JSON-RPC:</strong> POST ${getDomain()}/
             </div>
             <div class="endpoint-item">
-                <strong>REST API:</strong> POST ${config.supabase.url}/functions/v1/worker-dlp
+                <strong>REST API:</strong> POST ${getDomain()}/
             </div>
         </div>
 
         <div class="tools-section">
             <h2>🛠️ 可用工具 (${tools.length})</h2>
             <div class="tools-grid">
-                ${
-        tools.map((tool) => `
+                ${tools.map((tool) => `
                     <div class="tool-card">
                         <div class="tool-name">📦 ${tool.name}</div>
                         <div class="tool-desc">${tool.description}</div>
                     </div>
                 `).join("")
-    }
+        }
             </div>
         </div>
 
@@ -308,15 +302,86 @@ async function handleRequest(req: Request): Promise<Response> {
         return new Response(null, { status: 404 });
     }
 
-    // 处理主页请求 - 显示服务状态和工具信息
+    // 主页 HTML
     if (req.method === "GET" && url.pathname === "/") {
-        // console.log("📄 提供服务器主页");
         return new Response(generateHomePage(), {
             headers: {
                 ...corsHeaders,
                 "Content-Type": "text/html; charset=utf-8",
             },
         });
+    }
+
+    // 处理文件下载接口 GET /storage/{id}
+    if (req.method === "GET" && url.pathname.startsWith("/storage/")) {
+        const id = url.pathname.replace("/storage/", "");
+        if (!id) {
+            return new Response(JSON.stringify({ error: "缺少文件ID" }), {
+                status: 400,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+        // 查询任务
+        // 这里直接 import getTask，避免循环依赖
+        const { getTask } = await import("./lib/storage.ts");
+        const task = getTask(id);
+        if (!task) {
+            return new Response(JSON.stringify({ error: "任务不存在" }), {
+                status: 404,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+        if (task.status !== "success") {
+            // 返回详细任务状态，并拼接下载链接（如果已知 id）
+            return new Response(JSON.stringify({
+                error: "文件未就绪或任务未成功",
+                status: task.status,
+                message: task.error || (task.status === "pending" ? "任务等待中" : task.status === "running" ? "任务正在执行" : "任务失败"),
+                downloadUrl: getDownloadUrl(task.id),
+                task: {
+                    id: task.id,
+                    type: task.type,
+                    status: task.status,
+                    createdAt: task.createdAt,
+                    updatedAt: task.updatedAt,
+                    error: task.error,
+                    input: task.input,
+                }
+            }), {
+                status: 200,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+        // 任务 result 应为文件路径或 URL
+        const filePath = typeof task.result === "string" ? task.result : undefined;
+        if (!filePath) {
+            return new Response(JSON.stringify({ error: "未找到文件路径" }), {
+                status: 410,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+        }
+        try {
+            // 只支持本地文件路径（如需代理云端可扩展）
+            const file = await Deno.open(filePath, { read: true });
+            const stat = await Deno.stat(filePath);
+            const fileName = (filePath as string).split("/").pop() || `file-${id}`;
+            const headers = {
+                ...corsHeaders,
+                "Content-Type": "application/octet-stream",
+                "Content-Disposition": `attachment; filename=\"${encodeURIComponent(fileName)}\"`,
+                "Content-Length": stat.size.toString(),
+                "Cache-Control": "public, max-age=86400, immutable",
+            };
+            return new Response(file.readable, { status: 200, headers });
+        } catch (err) {
+            return new Response(
+                JSON.stringify({ error: "文件读取失败", detail: err instanceof Error ? err.message : String(err) }),
+                {
+                    status: 500,
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                },
+            );
+        }
     }
 
     // 只处理 POST 请求用于 API 调用
@@ -333,33 +398,33 @@ async function handleRequest(req: Request): Promise<Response> {
         );
     }
 
-    // API 密钥验证（如果配置了的话）
-    if (config.security.apiKey) {
-        const authHeader = req.headers.get("Authorization");
-        if (
-            !authHeader || !authHeader.startsWith("Bearer ") ||
-            authHeader.slice(7) !== config.security.apiKey
-        ) {
-            console.log("❌ API 密钥验证失败");
-            return new Response(
-                JSON.stringify({
-                    jsonrpc: "2.0",
-                    error: {
-                        code: -32001,
-                        message: "未授权：无效或缺失的 API 密钥",
-                    },
-                    id: null,
-                }),
-                {
-                    status: 401,
-                    headers: { ...corsHeaders, "Content-Type": "application/json" },
-                },
-            );
-        }
-    }
-
     try {
         const requestBody = await req.json();
+
+        // API 密钥验证（如果配置了的话）
+        if (config.security.apiKey) {
+            const authHeader = req.headers.get("Authorization");
+            if (
+                !authHeader || !authHeader.startsWith("Bearer ") ||
+                authHeader.slice(7) !== config.security.apiKey
+            ) {
+                console.log("❌ API 密钥验证失败");
+                return new Response(
+                    JSON.stringify({
+                        jsonrpc: "2.0",
+                        error: {
+                            code: -32001,
+                            message: "未授权：无效或缺失的 API 密钥",
+                        },
+                        id: requestBody.id || null,
+                    }),
+                    {
+                        status: 401,
+                        headers: { ...corsHeaders, "Content-Type": "application/json" },
+                    },
+                );
+            }
+        }
         console.log(`📨 收到请求: ${requestBody.jsonrpc ? "MCP JSON-RPC" : "REST API"}`);
 
         // 处理 MCP JSON-RPC 请求
@@ -400,47 +465,33 @@ async function handleRequest(req: Request): Promise<Response> {
 
         console.log(`🔧 REST API 调用: ${action} - ${videoUrl}`);
 
-        // 将 REST API 调用映射到工具调用
-        let toolName: string;
-        let toolArgs: Record<string, unknown>;
-
-        switch (action) {
-            case "info":
-                toolName = "get_video_info";
-                toolArgs = { url: videoUrl };
-                break;
-            case "download":
-                toolName = "download_video";
-                toolArgs = { url: videoUrl, ...options };
-                break;
-            case "audio":
-                toolName = "download_audio";
-                toolArgs = { url: videoUrl, ...options };
-                break;
-            case "formats":
-                toolName = "get_formats";
-                toolArgs = { url: videoUrl };
-                break;
-            case "playlist":
-                toolName = "download_playlist";
-                toolArgs = { url: videoUrl, ...options };
-                break;
-            default:
-                console.log(`❌ 未知的 REST API 操作: ${action}`);
-                return new Response(
-                    JSON.stringify({
-                        error: `未知操作: ${action}`,
-                    }),
-                    {
-                        status: 400,
-                        headers: { ...corsHeaders, "Content-Type": "application/json" },
-                    },
-                );
+        // 动态映射 action 到工具名，支持别名和自动注册
+        // 别名映射表（可扩展）
+        const actionAlias: Record<string, string> = {
+            info: "get_video_info",
+            download: "download_video",
+            audio: "download_audio",
+            formats: "get_formats",
+            playlist: "download_playlist",
+        };
+        // 优先用别名，否则直接用 action
+        const toolName = actionAlias[action] || action;
+        if (!toolRegistry.hasTool(toolName)) {
+            console.log(`❌ 未知的 REST API 操作: ${action}（未注册工具: ${toolName}）`);
+            return new Response(
+                JSON.stringify({
+                    error: `未知操作: ${action}（未注册工具: ${toolName}）`,
+                }),
+                {
+                    status: 400,
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                },
+            );
         }
-
+        // 组装参数，url 必须有
+        const toolArgs = { url: videoUrl, ...options };
         const result = await toolRegistry.executeTool(toolName, toolArgs);
         console.log(`✅ REST API 请求处理完成: ${toolName}`);
-
         return new Response(JSON.stringify(result), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -448,15 +499,30 @@ async function handleRequest(req: Request): Promise<Response> {
         const errorMessage = error instanceof Error ? error.message : "未知错误";
         console.error("❌ 请求处理失败:", errorMessage);
 
+        // 如果是JSON解析错误，id为null是正确的
+        // 如果是其他错误，尝试从可能存在的requestBody中获取id
+        let responseId = null;
+        let errorCode = -32700; // 默认为解析错误
+
+        // 检查是否是JSON解析错误
+        if (error instanceof SyntaxError || errorMessage.includes("JSON")) {
+            errorCode = -32700;
+            responseId = null;
+        } else {
+            // 其他错误，可能requestBody已经解析成功
+            errorCode = -32603; // 内部错误
+            // 这里无法获取requestBody，因为我们在catch块中
+        }
+
         return new Response(
             JSON.stringify({
                 jsonrpc: "2.0",
                 error: {
-                    code: -32700,
-                    message: "解析错误",
+                    code: errorCode,
+                    message: errorCode === -32700 ? "解析错误" : "内部错误",
                     data: errorMessage,
                 },
-                id: null,
+                id: responseId,
             }),
             {
                 status: 400,
@@ -472,8 +538,33 @@ console.log("🚀 正在启动 yt-dlp MCP 服务器...");
 console.log(`📍 版本: ${SERVER_INFO.version}`);
 console.log(`📋 描述: ${SERVER_INFO.description}`);
 
+
 // 初始化服务器组件
-await initializeServer();
+initializeServer();
+
+
+
+// 修复孤儿任务
+await fixOrphanedTasks();
+
+// 恢复未完成任务
+recoverUnfinishedTasks();
+
+// 注册优雅退出处理 - 使用 beforeunload 事件或进程退出钩子
+globalThis.addEventListener?.("beforeunload", async () => {
+    console.log("🛑 检测到进程退出，开始清理...");
+    await cleanupAllRunningProcesses();
+});
+
+// 对于 Deno，尝试使用 process 退出事件
+try {
+    globalThis.addEventListener?.("unload", async () => {
+        console.log("🛑 进程卸载，开始清理...");
+        await cleanupAllRunningProcesses();
+    });
+} catch {
+    // 忽略不支持的环境
+}
 
 // 启动 HTTP 服务器
 console.log("🌐 HTTP 服务器已启动，等待请求...");

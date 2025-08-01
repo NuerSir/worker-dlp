@@ -26,9 +26,7 @@ export interface AppConfig {
     };
 
     // Supabase 配置
-    supabase: {
-        url: string;
-        anonKey: string;
+    storage: {
         storageBucket: string;
     };
 
@@ -46,15 +44,15 @@ export interface AppConfig {
 export interface ConfigOverrides {
     // 网络配置覆盖
     PROXY_URL?: string;
-    
+
     // Supabase 配置覆盖
     SUPABASE_URL?: string;
     SUPABASE_ANON_KEY?: string;
     STORAGE_BUCKET?: string;
-    
+
     // 安全配置覆盖
     WORKER_DLP_API_KEY?: string;
-    
+
     // 功能配置覆盖
     MAX_DOWNLOADS?: string;
     FILE_RETENTION_HOURS?: string;
@@ -91,10 +89,8 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
             proxyUrl: getEnvValue("PROXY_URL"),
         },
 
-        supabase: {
-            url: getEnvValue("SUPABASE_URL", "http://localhost:54321")!,
-            anonKey: getEnvValue("SUPABASE_ANON_KEY", "")!,
-            storageBucket: getEnvValue("STORAGE_BUCKET", "tmp")!,
+        storage: {
+            storageBucket: getEnvValue("STORAGE_BUCKET", "./.storage")!,
         },
 
         features: {
@@ -111,12 +107,8 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
 export function validateConfig(config: AppConfig): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
 
-    if (!config.supabase.url) {
-        errors.push("缺少 SUPABASE_URL 环境变量");
-    }
-
-    if (!config.supabase.anonKey) {
-        errors.push("缺少 SUPABASE_ANON_KEY 环境变量");
+    if (!config.storage.storageBucket) {
+        errors.push("缺少 STORAGE_BUCKET 环境变量");
     }
 
     if (config.features.maxDownloads <= 0) {
@@ -162,7 +154,7 @@ export const config = loadConfig({
 if (import.meta.main) {
     console.log("🔧 当前配置:");
     console.log(JSON.stringify(config, null, 2));
-    
+
     const validation = validateConfig(config);
     if (validation.valid) {
         console.log("✅ 配置验证通过");
@@ -170,4 +162,40 @@ if (import.meta.main) {
         console.log("❌ 配置验证失败:");
         validation.errors.forEach(error => console.log(`  - ${error}`));
     }
+}
+
+
+
+
+
+// ========== 路径与外部访问工具 ==========
+/**
+ * 获取服务外部访问域名（用于拼接下载链接）
+ * 优先 DOMAIN 环境变量，否则用 localhost:port
+ */
+export function getDomain(): string {
+    return Deno.env.get("DOMAIN") || `http://localhost:${Deno.env.get("PORT") || 8000}`;
+}
+
+/**
+ * 获取下载产物目录（storage/files）
+ */
+export function getDownloadDir(): string {
+    // 依赖 lib/storage.ts 的 getFilesDir
+    // 为避免循环依赖，建议直接拼接
+    return `${config.storage.storageBucket}/files`;
+}
+
+/**
+ * 获取默认输出模板（storage/files/%(title)s.%(ext)s）
+ */
+export function getDefaultOutputTemplate(): string {
+    return `${getDownloadDir()}/%(title)s.%(ext)s`;
+}
+
+/**
+ * 拼接下载链接（/storage/{id}）
+ */
+export function getDownloadUrl(id: string): string {
+    return `${getDomain()}/storage/${id}`;
 }
